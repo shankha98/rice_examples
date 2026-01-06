@@ -1,0 +1,22 @@
+{
+    "name": "rice-node-examples",
+    "version": "1.0.0",
+    "description": "Node.js examples for Rice Slate",
+    "main": "index.js",
+    "scripts": {
+        "start:debate:slate": "ts-node debate_with_slate.ts",
+        "start:debate:no-slate": "ts-node debate_without_slate.ts",
+        "start:npc:slate": "ts-node npc_convo_with_slate.ts",
+        "start:npc:no-slate": "ts-node npc_convo_without_slate.ts"
+    },
+    "dependencies": {
+        "slate-client": "file:../clients/node",
+        "@google/generative-ai": "^0.24.1",
+        "dotenv": "^16.4.5"
+    },
+    "devDependencies": {
+        "ts-node": "^10.9.2",
+        "typescript": "^5.3.3",
+        "@types/node": "^20.11.19"
+    }
+}
