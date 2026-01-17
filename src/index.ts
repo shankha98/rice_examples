@@ -6,27 +6,13 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 dotenv.config({ path: path.resolve(__dirname, ".env") });
 
 async function main() {
-  const url =
-    process.env.STORAGE_INSTANCE_URL ||
-    process.env.RICEDB_HOST ||
-    "localhost:50051";
+  const url = process.env.STORAGE_INSTANCE_URL || "localhost:50051";
+  const [host, portStr] = url.split(":");
+  const grpcPort = portStr ? parseInt(portStr, 10) : 50051;
+  const httpPort = parseInt(process.env.STORAGE_HTTP_PORT || "3000", 10);
   const token = process.env.STORAGE_AUTH_TOKEN;
-  console.log(`Connecting to Storage at ${url}`);
 
-  let host = "localhost";
-  let grpcPort = 50051;
-  const parts = url.split(":");
-  if (parts.length === 2) {
-    host = parts[0];
-    grpcPort = parseInt(parts[1], 10);
-  } else {
-    host = url;
-  }
-
-  // HTTP Port is 80 if provided in env, else 3000
-  const httpPort = process.env.STORAGE_HTTP_PORT
-    ? parseInt(process.env.STORAGE_HTTP_PORT, 10)
-    : 3000;
+  console.log(`Connecting to Storage at ${host}:${grpcPort}`);
 
   const db = new RiceDBClient(host, "auto", grpcPort, httpPort, token);
 
