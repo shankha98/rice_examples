@@ -1,5 +1,5 @@
-.venv/
 .env
-.ruff_cache/
-.pytest_cache/
-__pypackages__/
+/dist
+/node_modules
+.DS_Store
+npm-debug.log
