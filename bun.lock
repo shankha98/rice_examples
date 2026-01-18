@@ -7,7 +7,7 @@
       "dependencies": {
         "@google/genai": "^1.37.0",
         "dotenv": "^17.2.3",
-        "rice-node-sdk": "^1.0.4",
+        "rice-node-sdk": "^1.0.5",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -205,7 +205,7 @@
 
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 
-    "rice-node-sdk": ["rice-node-sdk@1.0.4", "", { "dependencies": { "@grpc/grpc-js": "^1.10.0", "@grpc/proto-loader": "^0.7.10", "axios": "^1.6.0", "long": "^5.2.3" } }, "sha512-n7l1wXXg0TuRo4LiWsTHWyYc1K7lu+BbwVqqfnxEPtA5tYIa9A1/rsB4gzUTOxa88Mfz7AYojRrsFt1GZaW7fw=="],
+    "rice-node-sdk": ["rice-node-sdk@1.0.5", "", { "dependencies": { "@grpc/grpc-js": "^1.10.0", "@grpc/proto-loader": "^0.7.10", "axios": "^1.6.0", "long": "^5.2.3" } }, "sha512-5dDOeZZaKEQ6Vcp3NnU76IN52ywmH6fxZlVzDKTPIQqoSGfuXaw74zNt4c96v8J2ANmU6aAG0yyYswu1mAbaOQ=="],
 
     "rimraf": ["rimraf@5.0.10", "", { "dependencies": { "glob": "^10.3.7" }, "bin": { "rimraf": "dist/esm/bin.mjs" } }, "sha512-l0OE8wL34P4nJH/H2ffoaniAokM2qSmrtXHmlpvYr5AVVX8msAyW0l8NVJFDxlSK4u3Uh/f41cQheDVdnYijwQ=="],
 

@@ -1,4 +1,5 @@
-import { Client } from "rice-node-sdk";
+import { GoogleGenAI, FunctionCallingConfigMode } from "@google/genai";
+import { Client, statetool } from "rice-node-sdk";
 import * as dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -9,484 +10,233 @@ const __dirname = path.dirname(__filename);
 // Load environment variables
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
 /**
  * Cognitive Agent Example
  *
- * This example demonstrates how to build a goal-directed cognitive agent
- * using the State service's advanced features:
- *
- * 1. Working Memory - Structured variables for agent state
- * 2. Goals - Hierarchical goal management
- * 3. Actions - Action logging and execution
- * 4. Decision Cycles - Autonomous decision-making with candidates
- * 5. Concepts - Schema definitions for structured knowledge
+ * A complete AI agent using Google Gemini with Rice SDK memory tools.
+ * The agent can:
+ * - Store and recall information from long-term memory
+ * - Manage working memory variables
+ * - Track goals and progress
+ * - Log reasoning and actions
  */
 
-interface AgentConfig {
-  id: string;
-  name: string;
-  description: string;
-}
+async function chat(
+  ai: GoogleGenAI,
+  client: Client,
+  prompt: string,
+  maxIterations = 3,
+): Promise<string> {
+  console.log(`\n[User] ${prompt}`);
 
-class CognitiveAgent {
-  private client: Client;
-  private config: AgentConfig;
-  private cycleCount: number = 0;
+  let contents: any[] = [{ role: "user", parts: [{ text: prompt }] }];
 
-  constructor(client: Client, config: AgentConfig) {
-    this.client = client;
-    this.config = config;
-  }
+  for (let i = 0; i < maxIterations; i++) {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents,
+      config: {
+        systemInstruction: `You are a cognitive agent with persistent memory capabilities. 
+          Use the provided tools to:
+          - Store important information using 'remember' for long-term memory
+          - Use 'focus' to add items to short-term working memory  
+          - Use 'recall' to search your memories
+          - Use 'setVariable'/'getVariable' for structured state
+          - Use 'addGoal'/'updateGoal' to track objectives
+          - Use 'submitAction' to log your reasoning process
 
-  /**
-   * Initialize the agent's working memory and concepts
-   */
-  async initialize(): Promise<void> {
-    console.log(`\n[${this.config.name}] Initializing...`);
-
-    // Set up initial working memory state
-    await this.client.state.setVariable("agent_id", this.config.id, "system");
-    await this.client.state.setVariable(
-      "agent_name",
-      this.config.name,
-      "system",
-    );
-    await this.client.state.setVariable("agent_status", "active", "system");
-    await this.client.state.setVariable("cycle_count", 0, "system");
-    await this.client.state.setVariable(
-      "context",
-      {
-        initialized_at: new Date().toISOString(),
-        description: this.config.description,
-      },
-      "system",
-    );
-
-    // Define concepts (schemas) the agent understands
-    await this.client.state.defineConcept("Observation", {
-      type: "object",
-      properties: {
-        content: { type: "string" },
-        source: { type: "string" },
-        timestamp: { type: "string" },
-        confidence: { type: "number", minimum: 0, maximum: 1 },
-      },
-      required: ["content", "source"],
-    });
-
-    await this.client.state.defineConcept("Plan", {
-      type: "object",
-      properties: {
-        goal_id: { type: "string" },
-        steps: { type: "array", items: { type: "string" } },
-        estimated_cycles: { type: "number" },
-        status: {
-          type: "string",
-          enum: ["pending", "executing", "completed", "failed"],
+          Be proactive about using memory tools to maintain context across conversations.`,
+        tools: [{ functionDeclarations: statetool.google as any }],
+        toolConfig: {
+          functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO },
         },
       },
-      required: ["goal_id", "steps"],
     });
 
-    console.log(`[${this.config.name}] Initialization complete.`);
+    const calls = response.functionCalls;
+
+    // If model made tool calls, execute them and continue
+    if (calls && calls.length > 0) {
+      console.log(`[Agent] Calling ${calls.length} tool(s)...`);
+
+      // Add assistant response with function calls to history
+      contents.push({
+        role: "model",
+        parts: calls.map((c) => ({
+          functionCall: { name: c.name, args: c.args },
+        })),
+      });
+
+      // Execute tools and collect results
+      const functionResponses: any[] = [];
+      for (const call of calls) {
+        if (!call.name) continue;
+
+        console.log(`        -> ${call.name}(${JSON.stringify(call.args)})`);
+
+        try {
+          const result = await statetool.execute(
+            call.name,
+            call.args || {},
+            client.state,
+          );
+          console.log(
+            `        <- ${JSON.stringify(result).slice(0, 100)}${JSON.stringify(result).length > 100 ? "..." : ""}`,
+          );
+          functionResponses.push({
+            functionResponse: { name: call.name, response: { result } },
+          });
+        } catch (e: any) {
+          console.log(`        <- Error: ${e.message}`);
+          functionResponses.push({
+            functionResponse: {
+              name: call.name,
+              response: { error: e.message },
+            },
+          });
+        }
+      }
+
+      // Add function responses to history
+      contents.push({ role: "user", parts: functionResponses });
+      continue;
+    }
+
+    // No tool calls - return text response
+    const text = response.text || "(no response)";
+    console.log(`[Agent] ${text}`);
+    return text;
   }
 
-  /**
-   * Add a goal to the agent's goal stack
-   */
-  async addGoal(
-    description: string,
-    priority: "low" | "medium" | "high" | "critical" = "medium",
-    parentId?: string,
-  ): Promise<any> {
-    console.log(
-      `\n[${this.config.name}] Adding goal: "${description}" (${priority})`,
-    );
-
-    const goal = await this.client.state.addGoal(
-      description,
-      priority,
-      parentId,
-    );
-
-    // Log the action
-    await this.client.state.submitAction(this.config.id, "reason", {
-      thought: `Added new ${priority} priority goal`,
-      goal_description: description,
-      goal_id: goal.id,
-    });
-
-    return goal;
-  }
-
-  /**
-   * Process an observation and store it in memory
-   */
-  async observe(
-    content: string,
-    source: string,
-    confidence: number = 1.0,
-  ): Promise<void> {
-    console.log(
-      `\n[${this.config.name}] Observing: "${content}" from ${source}`,
-    );
-
-    // Store in episodic memory
-    await this.client.state.commit(content, `Observation from ${source}`, {
-      action: "observe",
-      agent_id: this.config.id,
-      reasoning: `Confidence: ${confidence}`,
-    });
-
-    // Update working memory
-    await this.client.state.setVariable(
-      "last_observation",
-      {
-        content,
-        source,
-        timestamp: new Date().toISOString(),
-        confidence,
-      },
-      "perception",
-    );
-
-    // Log the action
-    await this.client.state.submitAction(this.config.id, "learn", {
-      observation: content,
-      source,
-      confidence,
-    });
-  }
-
-  /**
-   * Recall relevant memories based on a query
-   */
-  async recall(query: string, limit: number = 5): Promise<any[]> {
-    console.log(`\n[${this.config.name}] Recalling: "${query}"`);
-
-    const memories = await this.client.state.reminisce(query, limit);
-
-    // Log the retrieval action
-    await this.client.state.submitAction(this.config.id, "retrieve", {
-      query,
-      limit,
-      results_count: memories.length,
-    });
-
-    return memories;
-  }
-
-  /**
-   * Run a decision cycle with candidate actions
-   */
-  async runDecisionCycle(
-    candidates: Array<{
-      actionType: string;
-      action: any;
-      score: number;
-      rationale: string;
-    }>,
-  ): Promise<any> {
-    this.cycleCount++;
-    console.log(
-      `\n[${this.config.name}] Running decision cycle #${this.cycleCount}`,
-    );
-    console.log(`  Candidates: ${candidates.length}`);
-    candidates.forEach((c, i) => {
-      console.log(
-        `    ${i + 1}. [${c.actionType}] score=${c.score.toFixed(2)} - ${c.rationale}`,
-      );
-    });
-
-    // Update cycle count in working memory
-    await this.client.state.setVariable(
-      "cycle_count",
-      this.cycleCount,
-      "system",
-    );
-
-    // Run the decision cycle
-    const result = await this.client.state.runCycle(this.config.id, candidates);
-
-    console.log(`  Selected: ${result.selectedAction?.action_type || "none"}`);
-    console.log(`  Planning time: ${result.planningTimeMs}ms`);
-    console.log(`  Execution time: ${result.executionTimeMs}ms`);
-
-    return result;
-  }
-
-  /**
-   * Execute a reasoning step
-   */
-  async reason(thought: string, conclusion: string): Promise<any> {
-    console.log(`\n[${this.config.name}] Reasoning...`);
-    console.log(`  Thought: ${thought}`);
-    console.log(`  Conclusion: ${conclusion}`);
-
-    const result = await this.client.state.submitAction(
-      this.config.id,
-      "reason",
-      {
-        thought,
-        conclusion,
-        cycle: this.cycleCount,
-      },
-    );
-
-    // Store the reasoning in working memory
-    await this.client.state.setVariable(
-      "last_reasoning",
-      {
-        thought,
-        conclusion,
-        timestamp: new Date().toISOString(),
-      },
-      "reasoning",
-    );
-
-    return result;
-  }
-
-  /**
-   * Update a goal's status
-   */
-  async updateGoalStatus(
-    goalId: string,
-    status: "active" | "suspended" | "achieved" | "abandoned" | "failed",
-  ): Promise<void> {
-    console.log(`\n[${this.config.name}] Updating goal ${goalId} to ${status}`);
-
-    await this.client.state.updateGoal(goalId, status);
-
-    await this.client.state.submitAction(this.config.id, "reason", {
-      thought: `Goal status changed to ${status}`,
-      goal_id: goalId,
-    });
-  }
-
-  /**
-   * Get the agent's current state summary
-   */
-  async getStateSummary(): Promise<void> {
-    console.log(`\n[${this.config.name}] State Summary`);
-    console.log("=".repeat(50));
-
-    // Variables
-    const variables = await this.client.state.listVariables();
-    console.log(`\nWorking Memory (${variables.length} variables):`);
-    variables.forEach((v: any) => {
-      const valueStr = JSON.stringify(v.value);
-      const truncated =
-        valueStr.length > 50 ? valueStr.substring(0, 47) + "..." : valueStr;
-      console.log(`  - ${v.name}: ${truncated} (${v.source})`);
-    });
-
-    // Goals
-    const goals = await this.client.state.listGoals();
-    console.log(`\nGoals (${goals.length} total):`);
-    goals.forEach((g: any) => {
-      console.log(`  - [${g.priority}/${g.status}] ${g.description}`);
-    });
-
-    // Concepts
-    const concepts = await this.client.state.listConcepts();
-    console.log(`\nConcepts (${concepts.length} defined):`);
-    concepts.forEach((c: any) => {
-      console.log(`  - ${c.name}`);
-    });
-
-    // Recent actions
-    const actions = await this.client.state.getActionLog(5);
-    console.log(`\nRecent Actions (last 5):`);
-    actions.forEach((a: any) => {
-      console.log(`  - [${a.actionType}] ${a.success ? "✓" : "✗"}`);
-    });
-
-    // Cycle history
-    const cycles = await this.client.state.getCycleHistory(3);
-    console.log(`\nRecent Cycles (last 3):`);
-    cycles.forEach((c: any) => {
-      console.log(
-        `  - Cycle ${c.cycle_number}: ${c.planning_time_ms}ms planning, ${c.execution_time_ms}ms execution`,
-      );
-    });
-
-    console.log("=".repeat(50));
-  }
-
-  /**
-   * Shutdown the agent gracefully
-   */
-  async shutdown(): Promise<void> {
-    console.log(`\n[${this.config.name}] Shutting down...`);
-
-    await this.client.state.setVariable("agent_status", "shutdown", "system");
-
-    await this.client.state.submitAction(this.config.id, "reason", {
-      thought: "Agent shutting down",
-      total_cycles: this.cycleCount,
-    });
-
-    console.log(
-      `[${this.config.name}] Shutdown complete. Total cycles: ${this.cycleCount}`,
-    );
-  }
+  return "(max iterations reached)";
 }
 
 async function main() {
-  const timestamp = Date.now();
-  const runId = `cognitive-agent-${timestamp}`;
+  if (!GEMINI_API_KEY) {
+    console.error(
+      "Error: GEMINI_API_KEY not set. Create .env file with your API key.",
+    );
+    console.error("Get one at: https://aistudio.google.com/apikey");
+    process.exit(1);
+  }
 
-  console.log("=".repeat(60));
-  console.log("Cognitive Agent Example");
-  console.log("=".repeat(60));
-  console.log(`Run ID: ${runId}`);
+  console.log("Cognitive Agent with Google Gemini + Rice Memory");
+  console.log("=".repeat(50));
 
+  // Initialize Rice client
   const client = new Client({
-    runId,
+    runId: `agent-${Date.now()}`,
     configPath: path.resolve(__dirname, "../rice.config.js"),
   });
 
+  await client.connect();
+  console.log("Connected to Rice State service");
+  console.log(`Available tools: ${statetool.google.length}`);
+
+  // Initialize Gemini
+  const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+  // =========================================================================
+  // Conversation 1: Establish context and remember preferences
+  // =========================================================================
+  console.log("\n" + "-".repeat(50));
+  console.log("Phase 1: Learning about the user");
+  console.log("-".repeat(50));
+
+  await chat(
+    ai,
+    client,
+    "Hi! I'm Alex, a software engineer working on a machine learning project. " +
+      "I prefer Python for ML work but use TypeScript for web apps. " +
+      "Please remember these details about me.",
+  );
+
+  // =========================================================================
+  // Conversation 2: Set up goals
+  // =========================================================================
+  console.log("\n" + "-".repeat(50));
+  console.log("Phase 2: Planning with goals");
+  console.log("-".repeat(50));
+
+  await chat(
+    ai,
+    client,
+    "I need to build a recommendation system. Can you help me plan this? " +
+      "Create goals for: 1) Data collection, 2) Model training, 3) API deployment.",
+  );
+
+  // =========================================================================
+  // Conversation 3: Working memory for current context
+  // =========================================================================
+  console.log("\n" + "-".repeat(50));
+  console.log("Phase 3: Managing working memory");
+  console.log("-".repeat(50));
+
+  await chat(
+    ai,
+    client,
+    "Set my current_task to 'designing the data pipeline' and my deadline to 'February 1, 2026'. " +
+      "Then tell me what you have stored.",
+  );
+
+  // Wait for memory indexing
+  console.log("\n(waiting 2s for memory indexing...)");
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // =========================================================================
+  // Conversation 4: Recall and reason
+  // =========================================================================
+  console.log("\n" + "-".repeat(50));
+  console.log("Phase 4: Recall and reasoning");
+  console.log("-".repeat(50));
+
+  await chat(
+    ai,
+    client,
+    "What do you remember about me and my project? " +
+      "Search your memory and give me a summary.",
+  );
+
+  // =========================================================================
+  // Conversation 5: Complex multi-tool interaction
+  // =========================================================================
+  console.log("\n" + "-".repeat(50));
+  console.log("Phase 5: Complex reasoning");
+  console.log("-".repeat(50));
+
+  await chat(
+    ai,
+    client,
+    "I just finished the data collection phase. Please: " +
+      "1) Update that goal as achieved, " +
+      "2) Log a reasoning action about our progress, " +
+      "3) Tell me what's next based on our goals.",
+  );
+
+  // =========================================================================
+  // Summary
+  // =========================================================================
+  console.log("\n" + "=".repeat(50));
+  console.log("Session complete!");
+  console.log("=".repeat(50));
+
+  // Show final state
+  const vars = await client.state.listVariables();
+  const goals = await client.state.listGoals();
+
+  console.log(`\nFinal state:`);
+  console.log(`  Variables: ${vars.length}`);
+  console.log(`  Goals: ${goals.length}`);
+
+  // Cleanup
   try {
-    console.log("\nConnecting to State service...");
-    await client.connect();
-    console.log("Connected.");
-
-    // Create and initialize the agent
-    const agent = new CognitiveAgent(client, {
-      id: "cognitive-agent-1",
-      name: "ResearchBot",
-      description: "A cognitive agent that researches and learns",
-    });
-
-    await agent.initialize();
-
-    // =========================================================================
-    // Scenario: Research Task
-    // =========================================================================
-    console.log("\n" + "=".repeat(60));
-    console.log("SCENARIO: Research Task");
-    console.log("=".repeat(60));
-
-    // 1. Set up goals
-    const mainGoal = await agent.addGoal(
-      "Research and summarize information about AI agents",
-      "high",
-    );
-
-    const subGoal1 = await agent.addGoal(
-      "Gather observations from available sources",
-      "medium",
-      mainGoal.id,
-    );
-
-    const subGoal2 = await agent.addGoal(
-      "Synthesize findings into coherent knowledge",
-      "medium",
-      mainGoal.id,
-    );
-
-    // 2. Observe some information
-    await agent.observe(
-      "Cognitive architectures provide a framework for building intelligent agents",
-      "documentation",
-      0.95,
-    );
-
-    await agent.observe(
-      "Working memory is crucial for maintaining context during reasoning",
-      "research_paper",
-      0.88,
-    );
-
-    await agent.observe(
-      "Goal-directed behavior enables autonomous decision making",
-      "textbook",
-      0.92,
-    );
-
-    // 3. Wait for indexing
-    console.log("\nWaiting 3s for memory indexing...");
-    await new Promise((r) => setTimeout(r, 3000));
-
-    // 4. Recall and reason
-    const memories = await agent.recall("cognitive architecture reasoning");
-    console.log(`\nRecalled ${memories.length} relevant memories.`);
-
-    await agent.reason(
-      "Based on observations, cognitive architectures with working memory and goal management are effective for building intelligent agents",
-      "The State service provides all necessary components for building a cognitive agent",
-    );
-
-    // 5. Run decision cycles
-    await agent.runDecisionCycle([
-      {
-        actionType: "reason",
-        action: {
-          thought: "Need more information about specific implementations",
-        },
-        score: 0.7,
-        rationale: "Current knowledge is general",
-      },
-      {
-        actionType: "retrieve",
-        action: { query: "specific agent implementations" },
-        score: 0.8,
-        rationale: "Would provide concrete examples",
-      },
-      {
-        actionType: "learn",
-        action: { fact: "Synthesize current findings" },
-        score: 0.6,
-        rationale: "Have enough for initial synthesis",
-      },
-    ]);
-
-    await agent.runDecisionCycle([
-      {
-        actionType: "reason",
-        action: { thought: "Synthesizing research findings" },
-        score: 0.9,
-        rationale: "Ready to conclude research phase",
-      },
-      {
-        actionType: "ground",
-        action: { tool: "generate_report" },
-        score: 0.5,
-        rationale: "Could generate formal report",
-      },
-    ]);
-
-    // 6. Mark goals as achieved
-    await agent.updateGoalStatus(subGoal1.id, "achieved");
-    await agent.updateGoalStatus(subGoal2.id, "achieved");
-    await agent.updateGoalStatus(mainGoal.id, "achieved");
-
-    // 7. Get final state summary
-    await agent.getStateSummary();
-
-    // 8. Shutdown
-    await agent.shutdown();
-
-    // 9. Cleanup
-    console.log("\nCleaning up run data...");
-    try {
-      await client.state.deleteRun();
-      console.log("Cleanup complete.");
-    } catch (cleanupError: any) {
-      console.warn(
-        "Warning: Failed to cleanup run data:",
-        cleanupError.message,
-      );
-    }
-
-    console.log("\n" + "=".repeat(60));
-    console.log("COGNITIVE AGENT EXAMPLE COMPLETE");
-    console.log("=".repeat(60));
-  } catch (e: any) {
-    console.error("\nError:", e.message);
-    console.error(e.stack);
+    await client.state.deleteRun();
+    console.log(`  Cleaned up run data`);
+  } catch (e) {
+    // Server limitation
   }
 }
 
-main();
+main().catch(console.error);
